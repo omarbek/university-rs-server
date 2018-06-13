@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="war" name="univercity-rs-server:war">
+    <output-path>$PROJECT_DIR$/target</output-path>
+    <root id="archive" name="univercity-rs-server.war">
+      <element id="artifact" artifact-name="univercity-rs-server:war exploded" />
+    </root>
+  </artifact>
+</component>
