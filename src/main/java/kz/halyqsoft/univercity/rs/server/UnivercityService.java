@@ -24,6 +24,10 @@ public class UnivercityService {
 
     private Connection connection;
 
+    private static final int ROOM_NOT_FOUND = 0;
+    private static final int LESSON_NOT_FOUND = 1;
+    private static final int SUCCESSFULLY_INSERTED = 2;
+
     public UnivercityService() {
     }
 
@@ -39,7 +43,7 @@ public class UnivercityService {
     public Response getUserArrival(String data) {
         begin("University web service: arrivals of users", data);
 
-        String message = getMessage(data);
+        String message = getMessage(data, true);
 
         return Response.ok(message).build();
     }
@@ -91,6 +95,17 @@ public class UnivercityService {
         return Response.ok(json.toString()).build();
     }
 
+    @POST
+    @Path("/student_attendance")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getStudentAttendance(String data) {
+        begin("University web service: attendances of students", data);
+
+        String message = getMessage(data, false);
+
+        return Response.ok(message).build();
+    }
+
     private byte[] getPhotoByteArray(JSONObject jsonObject) throws Exception {
         Object login = jsonObject.get("user_login");
         String sql = "select ph.photo from users usr" +
@@ -140,12 +155,12 @@ public class UnivercityService {
         System.out.println(data);
     }
 
-    private String getMessage(String data) {
+    private String getMessage(String data, boolean isUserArrival) {
         JSONObject jsonObject = new JSONObject(data);
         String connectionMessage = connect();
         if (connectionMessage != null) return connectionMessage;
 
-        String insertMessage = insert(jsonObject);
+        String insertMessage = insert(jsonObject, isUserArrival);
         if (insertMessage != null) return insertMessage;
 
         String closeMessage = close();
@@ -168,10 +183,25 @@ public class UnivercityService {
         return null;
     }
 
-    private String insert(JSONObject jsonObject) {
+    private String insert(JSONObject jsonObject, boolean isUserArrival) {
         try {
             if (isAvailable(jsonObject)) {
-                insertToDb(jsonObject);
+                if (isUserArrival) {
+                    insertIntoUserArrival(jsonObject);
+                } else {
+                    Object userCode = jsonObject.get("user_code");
+                    if (checkIfCardExists(userCode)) {
+                        int result = insertIntoStudentAttendance(jsonObject);
+                        if (result == ROOM_NOT_FOUND) {
+                            return getMessage(null, "Room not found");
+                        }
+                        if (result == LESSON_NOT_FOUND) {
+                            return getMessage(null, "Lesson not found");
+                        }
+                    } else {
+                        return getMessage(null, "No cards with this number: " + userCode);
+                    }
+                }
             } else {
                 return getMessage(null, "You have no access to the service!");
             }
@@ -179,6 +209,74 @@ public class UnivercityService {
             return getMessage(e, "Unable to check or insert");
         }
         return null;
+    }
+
+    private int insertIntoStudentAttendance(JSONObject jsonObject) throws SQLException {
+        Object userCode = jsonObject.get("user_code");
+        Object deviceName = jsonObject.get("device_name");
+        int userId = getUserId(userCode);
+        int roomId = getRoomId(deviceName);
+        if (roomId == 0) {
+            return ROOM_NOT_FOUND;
+        }
+
+        String lessonSql = "SELECT lesson.id " +
+                "FROM lesson " +
+                "  INNER JOIN schedule_detail sched_det ON sched_det.id = lesson.schedule_detail_id " +
+                "  INNER JOIN semester_data sem_data ON sem_data.id = sched_det.semester_data_id " +
+                "  INNER JOIN student_education stu_edu ON stu_edu.groups_id = sched_det.group_id " +
+                "  INNER JOIN student stu ON stu_edu.student_id = stu.id AND stu_edu.child_id IS NULL " +
+                "  INNER JOIN lesson_time ON lesson_time.id = sched_det.lesson_time_id " +
+                "  INNER JOIN time begin_time ON begin_time.id = lesson_time.begin_time_id " +
+                "  INNER JOIN time end_time ON end_time.id = lesson_time.end_time_id " +
+                "WHERE sched_det.room_id = ? AND stu.id = ? AND " +
+                "      CURRENT_DATE BETWEEN sem_data.begin_date AND sem_data.end_date " +
+                "      AND sched_det.week_day_id = extract(DOW FROM current_date) " +
+                "      AND to_char(clock_timestamp(), 'HH24:MI:SS') BETWEEN begin_time.time_name " +
+                "      AND end_time.time_name;";
+
+        PreparedStatement lessonPS = connection.prepareStatement(lessonSql);
+        lessonPS.setInt(1, roomId);
+        lessonPS.setInt(2, userId);
+        ResultSet lessonRS = lessonPS.executeQuery();
+        if (lessonRS.next()) {
+            int lessonId = lessonRS.getInt("id");
+            String updateSql = "UPDATE lesson_detail " +
+                    "SET attendance_mark = 1 " +
+                    "WHERE lesson_id = ?;";
+            PreparedStatement updatePS = connection.prepareStatement(updateSql);
+            updatePS.setInt(1, lessonId);
+            updatePS.executeUpdate();
+        } else {
+            return LESSON_NOT_FOUND;
+        }
+        return SUCCESSFULLY_INSERTED;
+    }
+
+    private int getRoomId(Object deviceName) throws SQLException {
+        String sql = "SELECT room.id " +
+                "FROM room " +
+                "  INNER JOIN device ON device.id = room.device_id " +
+                "WHERE device.name = ?;";
+        PreparedStatement roomPS = connection.prepareStatement(sql);
+        roomPS.setString(1, deviceName.toString());
+        ResultSet roomRS = roomPS.executeQuery();
+        int id = 0;
+        if (roomRS.next()) {
+            id = roomRS.getInt("id");
+        }
+        return id;
+    }
+
+    private boolean checkIfCardExists(Object userCode) throws SQLException {
+        String checkSQL = "SELECT 1 " +
+                "FROM users usr " +
+                "  INNER JOIN card ON card.id = usr.card_id " +
+                "WHERE card.card_name = ? AND usr.deleted = FALSE;";
+        PreparedStatement preparedStatement = connection.prepareStatement(checkSQL);
+        preparedStatement.setString(1, userCode.toString());
+        ResultSet resultSet = preparedStatement.executeQuery();
+        return resultSet.next();
     }
 
     private String connect() {
@@ -191,8 +289,8 @@ public class UnivercityService {
         System.out.println("PostgreSQL JDBC Driver Registered!");
 
         try {
-            connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:5432/univerdb", "postgres",
-                    "ukpu18!");
+            connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:5432/univerdb",
+                    "postgres", "ukpu18!");
         } catch (SQLException e) {
             return getMessage(e, "Connection Failed! Check output console");
         }
@@ -207,7 +305,7 @@ public class UnivercityService {
         return message;
     }
 
-    private void insertToDb(JSONObject jsonObject) throws SQLException {
+    private void insertIntoUserArrival(JSONObject jsonObject) throws SQLException {
         Object userCode = jsonObject.get("user_code");
         Object turnstileTypeId = jsonObject.get("turnstile_type_id");
         int turnstileType = Integer.parseInt(turnstileTypeId.toString());
